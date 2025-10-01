@@ -1,7 +1,236 @@
-Flask
-Flask-Cors
-python-dotenv
-requests
-Pillow
-gunicorn
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>💵 NoteSense Live Detector</title>
+    <style>
+        :root {
+            --primary-color: #007bff;
+            --success-color: #28a745;
+            --warning-color: #ffc107;
+            --error-color: #dc3545;
+            --background-dark: #1e1e1e;
+            --surface-dark: #2d2d2d;
+            --text-light: #f4f4f4;
+            --border-default: #444;
+            --status-color: var(--border-default);
+        }
 
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: var(--background-dark);
+            color: var(--text-light);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background: var(--surface-dark);
+            padding: 30px;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 {
+            text-align: center;
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            font-size: 2em;
+        }
+
+        .video-container { 
+            position: relative; 
+            width: 100%; 
+            max-width: 560px; 
+            margin: 15px auto;
+            border: 4px solid var(--status-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: border-color 0.5s ease-in-out, box-shadow 0.5s ease-in-out;
+            aspect-ratio: 16 / 9;
+        }
+        
+        video { 
+            width: 100%; 
+            height: 100%;
+            object-fit: cover;
+            display: block; 
+        }
+
+        canvas { display: none; }
+
+        #status-bar {
+            height: 40px;
+            text-align: center;
+            line-height: 40px;
+            font-size: 1em;
+            font-weight: 500;
+            color: var(--text-light);
+            background-color: var(--status-color);
+            transition: background-color 0.5s ease-in-out;
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 10;
+        }
+
+        .result-text {
+            text-align: center;
+            padding: 20px 0 5px;
+            font-size: 1.6em;
+            font-weight: bold;
+            color: var(--text-light);
+            min-height: 50px;
+        }
+
+        @keyframes pulse-success {
+            0% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.4); }
+            70% { box-shadow: 0 0 0 15px rgba(40, 167, 69, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0); }
+        }
+
+        .video-container.validated {
+            --status-color: var(--success-color);
+            animation: pulse-success 1.5s infinite;
+        }
+        .video-container.analyzing {
+            --status-color: var(--warning-color);
+        }
+        .video-container.error {
+            --status-color: var(--error-color);
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💵 NoteSense Live Detector</h1>
+        
+        <div id="videoContainer" class="video-container analyzing">
+            <video id="video" autoplay playsinline></video>
+            <div id="status-bar">Awaiting camera permission...</div>
+        </div>
+
+        <canvas id="canvas"></canvas>
+
+        <div class="result-text">
+            <span id="finalResult">Point the camera at an Indian banknote to start.</span>
+        </div>
+    </div>
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const context = canvas.getContext('2d');
+    const statusBar = document.getElementById('status-bar');
+    const finalResult = document.getElementById('finalResult');
+    const videoContainer = document.getElementById('videoContainer');
+
+    const BACKEND_URL = "/detect";
+    let isAnalyzing = false;
+    let lastSpeechText = "";
+    const CAPTURE_INTERVAL_MS = 1500;
+
+    async function setupCamera() {
+        try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error("Camera API not supported.");
+            }
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' },
+                audio: false
+            });
+
+            video.srcObject = stream;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.muted = true;
+
+            statusBar.textContent = 'Camera active. Analyzing...';
+            videoContainer.classList.add('analyzing');
+
+            video.addEventListener('loadedmetadata', () => {
+                if (!video.intervalId) {
+                    video.intervalId = setInterval(captureAndAnalyze, CAPTURE_INTERVAL_MS);
+                }
+            });
+        } catch (err) {
+            console.error(err);
+            statusBar.textContent = 'ERROR: Could not access camera.';
+            videoContainer.classList.remove('analyzing');
+            videoContainer.classList.add('error');
+            finalResult.textContent = 'Camera permission denied or not supported in this app.';
+        }
+    }
+
+    function captureAndAnalyze() {
+        if (isAnalyzing || video.readyState < 2) return;
+        isAnalyzing = true;
+        statusBar.textContent = 'ANALYZING...';
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        canvas.toBlob(async (blob) => {
+            const formData = new FormData();
+            formData.append('image', blob, 'frame.jpg');
+
+            try {
+                const response = await fetch(BACKEND_URL, { method: 'POST', body: formData });
+                const data = await response.json();
+
+                let speechText = data.speech_text || "Analysis complete.";
+
+                videoContainer.classList.remove('analyzing','error','validated');
+
+                if (data.full_validation && data.denomination !== "null") {
+                    finalResult.textContent = `✅ VALIDATED: ${speechText.toUpperCase()}`;
+                    videoContainer.classList.add('validated');
+                } else if (data.denomination !== "null") {
+                    finalResult.textContent = `🟡 DETECTED: ${speechText.toUpperCase()} (Review Needed)`;
+                    videoContainer.classList.add('analyzing');
+                } else {
+                    finalResult.textContent = `❌ NOT DETECTED: ${speechText}`;
+                    videoContainer.classList.add('error');
+                }
+
+                statusBar.textContent = speechText;
+
+                if (speechText && speechText !== lastSpeechText) {
+                    speak(speechText);
+                    lastSpeechText = speechText;
+                }
+
+            } catch (err) {
+                console.error(err);
+                finalResult.textContent = "❌ CONNECTION ERROR: Ensure the backend server is running.";
+                statusBar.textContent = "CONNECTION ERROR";
+                videoContainer.classList.remove('analyzing');
+                videoContainer.classList.add('error');
+            } finally {
+                isAnalyzing = false;
+            }
+        }, 'image/jpeg', 0.8);
+    }
+
+    function speak(text) {
+        if ('speechSynthesis' in window) {
+            if (speechSynthesis.speaking) speechSynthesis.cancel();
+            speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        }
+    }
+
+    setupCamera();
+</script>
+
+</body>
+</html>
